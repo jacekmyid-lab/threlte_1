@@ -3,33 +3,15 @@
   import { onMount } from 'svelte'
   import * as THREE from 'three'
   import Module from 'manifold-3d'
-  import ManifoldPanel from './components/ManifoldPanel.svelte'
 
-  let manifoldReady = false
+  export let uiState
+  export let stats
+  export let manifoldReady = false
+  export let error = null
+
   let Manifold, Mesh
   let resultGeometry = null
-  let error = null
   let rotation = 0
-
-  // Stan UI
-  export let uiState = {
-    operation: 'union',
-    autoRotate: true,
-    showWireframe: false,
-    showStats: true,
-    boxSize: 1.0,
-    icoRadius: 0.6,
-    icoDetail: 0
-  }
-
-  // Statystyki
-  export let stats = {
-    vertices: 0,
-    triangles: 0,
-    genus: 0,
-    volume: 0,
-    surfaceArea: 0
-  }
 
   const materials = [
     new THREE.MeshLambertMaterial({ color: 0xff6b6b, flatShading: true }),
@@ -113,7 +95,6 @@
   function createIcosahedron() {
     const geometry = new THREE.IcosahedronGeometry(uiState.icoRadius, uiState.icoDetail)
     
-    // POPRAWKA: Upewnij się że geometria ma indeksy
     if (!geometry.index) {
       const positions = geometry.attributes.position
       const indices = []
@@ -135,28 +116,14 @@
       if (!resultGeometry) return
       
       stats.vertices = resultGeometry.attributes.position.count
-      stats.triangles = resultGeometry.index.count / 3
+      stats.triangles = Math.floor(resultGeometry.index.count / 3)
       
-      // Sprawdź które metody są dostępne w twojej wersji Manifold
       if (typeof manifoldResult.genus === 'function') {
         stats.genus = manifoldResult.genus()
       }
       
-      // Niektóre wersje używają getProperties(), inne numProp/properties
-      try {
-        if (typeof manifoldResult.getProperties === 'function') {
-          const prop = manifoldResult.getProperties()
-          stats.volume = prop.volume.toFixed(4)
-          stats.surfaceArea = prop.surfaceArea.toFixed(4)
-        } else {
-          // Fallback dla starszych wersji
-          stats.volume = 'N/A'
-          stats.surfaceArea = 'N/A'
-        }
-      } catch (propError) {
-        stats.volume = 'N/A'
-        stats.surfaceArea = 'N/A'
-      }
+      stats.volume = 'N/A'
+      stats.surfaceArea = 'N/A'
     } catch (e) {
       console.warn('Nie można pobrać statystyk:', e)
     }
@@ -174,11 +141,11 @@
       
       let result
       if (op === 'union') {
-        result = Manifold.union(manifoldBox, manifoldIco)
+        result = manifoldBox.add(manifoldIco)
       } else if (op === 'difference') {
-        result = Manifold.difference(manifoldBox, manifoldIco)
+        result = manifoldBox.subtract(manifoldIco)
       } else if (op === 'intersection') {
-        result = Manifold.intersection(manifoldBox, manifoldIco)
+        result = manifoldBox.intersect(manifoldIco)
       }
       
       const geo = mesh2geometry(result.getMesh())
@@ -190,71 +157,6 @@
       console.error('Operacja boolean nie powiodła się:', e)
       error = e.message
       return null
-    }
-  }
-
-  function testManifoldFeatures() {
-    if (!manifoldReady) return
-    
-    console.log('🧪 Testowanie funkcji Manifold...')
-    
-    try {
-      const box = new Manifold(geometry2mesh(createBoxWithSeparateFaces()))
-      
-      // Test transformacji
-      try {
-        const scaled = box.scale([1.5, 1.5, 1.5])
-        console.log('✅ Scale działa')
-      } catch (e) {
-        console.log('❌ Scale nie działa:', e.message)
-      }
-      
-      try {
-        const rotated = box.rotate([0, 0, 45])
-        console.log('✅ Rotate działa')
-      } catch (e) {
-        console.log('❌ Rotate nie działa:', e.message)
-      }
-      
-      try {
-        const translated = box.translate([2, 0, 0])
-        console.log('✅ Translate działa')
-      } catch (e) {
-        console.log('❌ Translate nie działa:', e.message)
-      }
-      
-      // Test Hull
-      try {
-        const ico = new Manifold(geometry2mesh(createIcosahedron()))
-        const hull = Manifold.hull([box, ico])
-        console.log('✅ Convex Hull działa')
-      } catch (e) {
-        console.log('❌ Hull nie działa:', e.message)
-      }
-      
-      // Test metod dostępnych w API
-      console.log('📋 Dostępne metody Manifold:', Object.getOwnPropertyNames(Object.getPrototypeOf(box)))
-      
-      if (typeof box.isEmpty === 'function') {
-        console.log('✅ Is Empty:', box.isEmpty())
-      }
-      
-      if (typeof box.genus === 'function') {
-        console.log('✅ Genus:', box.genus())
-      }
-      
-      if (typeof box.numVert === 'function') {
-        console.log('✅ Num Vert:', box.numVert())
-      }
-      
-      if (typeof box.numTri === 'function') {
-        console.log('✅ Num Tri:', box.numTri())
-      }
-      
-      console.log('🎉 Testy zakończone!')
-      
-    } catch (e) {
-      console.error('❌ Test nie powiódł się:', e)
     }
   }
 
@@ -283,8 +185,6 @@
       
       manifoldReady = true
       resultGeometry = performBooleanOperation(uiState.operation)
-      
-      testManifoldFeatures()
       
     } catch (e) {
       console.error('❌ Błąd ładowania Manifold:', e)
@@ -323,12 +223,5 @@
 
 <T.Mesh rotation.x={-Math.PI/2} position.y={-1.5} receiveShadow>
   <T.CircleGeometry args={[5, 32]}/>
-  <T.MeshStandardMaterial color="#1a1a1a" />
+  <T.MeshStandardMaterial color="#1a1a2e" />
 </T.Mesh>
-
-<ManifoldPanel 
-  bind:uiState 
-  {manifoldReady} 
-  {error} 
-  {stats}
-/>
