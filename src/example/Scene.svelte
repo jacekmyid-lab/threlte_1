@@ -2,28 +2,50 @@
   import { T, useFrame } from '@threlte/core'
   import { onMount } from 'svelte'
   import * as THREE from 'three'
-  
-  // Import Manifold z npm package
   import Module from 'manifold-3d'
+  import ManifoldPanel from './components/ManifoldPanel.svelte'
 
   let manifoldReady = false
   let Manifold, Mesh
   let resultGeometry = null
-  let operation = 'union'
   let error = null
   let rotation = 0
 
-  // Materiały dla różnych części
+  // Stan UI
+  export let uiState = {
+    operation: 'union',
+    autoRotate: true,
+    showWireframe: false,
+    showStats: true,
+    boxSize: 1.0,
+    icoRadius: 0.6,
+    icoDetail: 0
+  }
+
+  // Statystyki
+  export let stats = {
+    vertices: 0,
+    triangles: 0,
+    genus: 0,
+    volume: 0,
+    surfaceArea: 0
+  }
+
   const materials = [
-    new THREE.MeshLambertMaterial({ color: 0xff6b6b, flatShading: true }), // czerwony
-    new THREE.MeshLambertMaterial({ color: 0x4ecdc4, flatShading: true }), // cyjan
-    new THREE.MeshLambertMaterial({ color: 0xffe66d, flatShading: true })  // żółty
+    new THREE.MeshLambertMaterial({ color: 0xff6b6b, flatShading: true }),
+    new THREE.MeshLambertMaterial({ color: 0x4ecdc4, flatShading: true }),
+    new THREE.MeshLambertMaterial({ color: 0xffe66d, flatShading: true })
   ]
 
-  // IDs dla materiałów (system Manifold)
+  const wireframeMaterial = new THREE.MeshBasicMaterial({ 
+    color: 0xffffff, 
+    wireframe: true,
+    transparent: true,
+    opacity: 0.3
+  })
+
   let firstID, ids, id2matIndex
 
-  // Konwersja Three.js BufferGeometry -> Manifold Mesh
   function geometry2mesh(geometry) {
     const vertProperties = geometry.attributes.position.array
     const triVerts = geometry.index != null ?
@@ -54,7 +76,6 @@
     return mesh
   }
 
-  // Konwersja Manifold Mesh -> Three.js BufferGeometry
   function mesh2geometry(mesh) {
     const geometry = new THREE.BufferGeometry()
     
@@ -77,28 +98,70 @@
       }
     }
     
+    geometry.computeBoundingSphere()
     return geometry
   }
 
-  // Box ze składowych ścianek (różne materiały)
   function createBoxWithSeparateFaces() {
-    const geometry = new THREE.BoxGeometry(1, 1, 1)
+    const geometry = new THREE.BoxGeometry(uiState.boxSize, uiState.boxSize, uiState.boxSize)
     geometry.clearGroups()
-    geometry.addGroup(0, 18, 0)         // Pierwsze 6 ścian
-    geometry.addGroup(18, Infinity, 1)  // Reszta
+    geometry.addGroup(0, 18, 0)
+    geometry.addGroup(18, Infinity, 1)
     return geometry
   }
 
-  // Ikosahedron
   function createIcosahedron() {
-    const geometry = new THREE.IcosahedronGeometry(0.6)
+    const geometry = new THREE.IcosahedronGeometry(uiState.icoRadius, uiState.icoDetail)
+    
+    // POPRAWKA: Upewnij się że geometria ma indeksy
+    if (!geometry.index) {
+      const positions = geometry.attributes.position
+      const indices = []
+      for (let i = 0; i < positions.count; i++) {
+        indices.push(i)
+      }
+      geometry.setIndex(indices)
+    }
+    
     geometry.clearGroups()
-    geometry.addGroup(30, Infinity, 2)  // Druga połowa
-    geometry.addGroup(0, 30, 0)         // Pierwsza połowa
+    const halfFaces = Math.floor(geometry.index.count / 2)
+    geometry.addGroup(halfFaces, Infinity, 2)
+    geometry.addGroup(0, halfFaces, 0)
     return geometry
   }
 
-  // Wykonaj operację boolean
+  function updateStats(manifoldResult) {
+    try {
+      if (!resultGeometry) return
+      
+      stats.vertices = resultGeometry.attributes.position.count
+      stats.triangles = resultGeometry.index.count / 3
+      
+      // Sprawdź które metody są dostępne w twojej wersji Manifold
+      if (typeof manifoldResult.genus === 'function') {
+        stats.genus = manifoldResult.genus()
+      }
+      
+      // Niektóre wersje używają getProperties(), inne numProp/properties
+      try {
+        if (typeof manifoldResult.getProperties === 'function') {
+          const prop = manifoldResult.getProperties()
+          stats.volume = prop.volume.toFixed(4)
+          stats.surfaceArea = prop.surfaceArea.toFixed(4)
+        } else {
+          // Fallback dla starszych wersji
+          stats.volume = 'N/A'
+          stats.surfaceArea = 'N/A'
+        }
+      } catch (propError) {
+        stats.volume = 'N/A'
+        stats.surfaceArea = 'N/A'
+      }
+    } catch (e) {
+      console.warn('Nie można pobrać statystyk:', e)
+    }
+  }
+
   function performBooleanOperation(op) {
     if (!manifoldReady) return null
     
@@ -118,46 +181,110 @@
         result = Manifold.intersection(manifoldBox, manifoldIco)
       }
       
-      return mesh2geometry(result.getMesh())
+      const geo = mesh2geometry(result.getMesh())
+      updateStats(result)
+      error = null
+      return geo
       
     } catch (e) {
-      console.error('Boolean operation failed:', e)
+      console.error('Operacja boolean nie powiodła się:', e)
       error = e.message
       return null
     }
   }
 
-  // Animacja
+  function testManifoldFeatures() {
+    if (!manifoldReady) return
+    
+    console.log('🧪 Testowanie funkcji Manifold...')
+    
+    try {
+      const box = new Manifold(geometry2mesh(createBoxWithSeparateFaces()))
+      
+      // Test transformacji
+      try {
+        const scaled = box.scale([1.5, 1.5, 1.5])
+        console.log('✅ Scale działa')
+      } catch (e) {
+        console.log('❌ Scale nie działa:', e.message)
+      }
+      
+      try {
+        const rotated = box.rotate([0, 0, 45])
+        console.log('✅ Rotate działa')
+      } catch (e) {
+        console.log('❌ Rotate nie działa:', e.message)
+      }
+      
+      try {
+        const translated = box.translate([2, 0, 0])
+        console.log('✅ Translate działa')
+      } catch (e) {
+        console.log('❌ Translate nie działa:', e.message)
+      }
+      
+      // Test Hull
+      try {
+        const ico = new Manifold(geometry2mesh(createIcosahedron()))
+        const hull = Manifold.hull([box, ico])
+        console.log('✅ Convex Hull działa')
+      } catch (e) {
+        console.log('❌ Hull nie działa:', e.message)
+      }
+      
+      // Test metod dostępnych w API
+      console.log('📋 Dostępne metody Manifold:', Object.getOwnPropertyNames(Object.getPrototypeOf(box)))
+      
+      if (typeof box.isEmpty === 'function') {
+        console.log('✅ Is Empty:', box.isEmpty())
+      }
+      
+      if (typeof box.genus === 'function') {
+        console.log('✅ Genus:', box.genus())
+      }
+      
+      if (typeof box.numVert === 'function') {
+        console.log('✅ Num Vert:', box.numVert())
+      }
+      
+      if (typeof box.numTri === 'function') {
+        console.log('✅ Num Tri:', box.numTri())
+      }
+      
+      console.log('🎉 Testy zakończone!')
+      
+    } catch (e) {
+      console.error('❌ Test nie powiódł się:', e)
+    }
+  }
+
   useFrame((state, delta) => {
-    rotation += delta * 0.5
+    if (uiState.autoRotate) {
+      rotation += delta * 0.5
+    }
   })
 
-  // Ładowanie Manifold z NPM
   onMount(async () => {
     try {
       console.log('🔍 Ładowanie Manifold z NPM...')
       
-      // Załaduj WASM zgodnie z oficjalną dokumentacją
       const wasm = await Module()
       wasm.setup()
       
       Manifold = wasm.Manifold
       Mesh = wasm.Mesh
       
-      console.log('✅ Manifold i Mesh dostępne')
+      console.log('✅ Manifold załadowany')
       
-      // Set up Manifold IDs dla materiałów
       firstID = Manifold.reserveIDs(materials.length)
       ids = [...Array(materials.length)].map((_, idx) => firstID + idx)
       id2matIndex = new Map()
       ids.forEach((id, idx) => id2matIndex.set(id, idx))
       
-      console.log('✅ Material IDs skonfigurowane:', ids)
-      
       manifoldReady = true
-      resultGeometry = performBooleanOperation(operation)
+      resultGeometry = performBooleanOperation(uiState.operation)
       
-      console.log('✅ Manifold załadowany i gotowy!')
+      testManifoldFeatures()
       
     } catch (e) {
       console.error('❌ Błąd ładowania Manifold:', e)
@@ -165,9 +292,8 @@
     }
   })
 
-  // Reaguj na zmianę operacji
-  $: if (manifoldReady && operation) {
-    resultGeometry = performBooleanOperation(operation)
+  $: if (manifoldReady) {
+    resultGeometry = performBooleanOperation(uiState.operation)
   }
 </script>
 
@@ -182,164 +308,27 @@
 <T.DirectionalLight position={[5, 5, 5]} intensity={1} castShadow />
 <T.AmbientLight intensity={0.5} />
 
-<!-- Wynik operacji boolean -->
 {#if manifoldReady && resultGeometry}
-  <T.Mesh geometry={resultGeometry} material={materials} rotation.y={rotation}>
-  </T.Mesh>
+  <T.Mesh geometry={resultGeometry} material={materials} rotation.y={rotation} />
+  
+  {#if uiState.showWireframe}
+    <T.Mesh geometry={resultGeometry} material={wireframeMaterial} rotation.y={rotation} />
+  {/if}
 {:else if !error}
-  <!-- Placeholder podczas ładowania -->
   <T.Mesh>
     <T.BoxGeometry args={[1, 1, 1]} />
     <T.MeshStandardMaterial color="orange" />
   </T.Mesh>
 {/if}
 
-<!-- Podłoga -->
 <T.Mesh rotation.x={-Math.PI/2} position.y={-1.5} receiveShadow>
   <T.CircleGeometry args={[5, 32]}/>
-  <T.MeshStandardMaterial color="white" />
+  <T.MeshStandardMaterial color="#1a1a1a" />
 </T.Mesh>
 
-<!-- UI Controls -->
-<div class="controls">
-  <h2>🎮 Manifold Boolean Operations</h2>
-  
-  {#if !manifoldReady && !error}
-    <p class="status loading">⏳ Ładowanie Manifold z NPM...</p>
-  {:else if error}
-    <p class="status error">❌ {error}</p>
-    <p class="hint">💡 Upewnij się że: npm install manifold-3d</p>
-  {:else}
-    <p class="status success">✅ Manifold gotowy! (z npm)</p>
-  {/if}
-  
-  <div class="operation-selector">
-    <label>
-      <input type="radio" bind:group={operation} value="union" />
-      <span>Union (∪)</span>
-    </label>
-    <label>
-      <input type="radio" bind:group={operation} value="difference" />
-      <span>Difference (−)</span>
-    </label>
-    <label>
-      <input type="radio" bind:group={operation} value="intersection" />
-      <span>Intersection (∩)</span>
-    </label>
-  </div>
-  
-  <div class="info">
-    <p>🎨 <strong>Box</strong>: składany ze ścianek (materiały 0,1,2)</p>
-    <p>🔷 <strong>Ikosahedron</strong>: 2 kolory (materiały 0,2)</p>
-    <p>⚙️ <strong>Konwersja</strong>: Three.js ↔ Manifold</p>
-    <p>📦 <strong>Źródło</strong>: npm package manifold-3d</p>
-  </div>
-</div>
-
-<style>
-  :global(.controls) {
-    position: fixed;
-    top: 20px;
-    left: 20px;
-    background: rgba(0, 0, 0, 0.9);
-    color: white;
-    padding: 20px;
-    border-radius: 12px;
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-    min-width: 320px;
-    z-index: 1000;
-    backdrop-filter: blur(10px);
-    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
-  }
-
-  :global(.controls h2) {
-    margin: 0 0 15px 0;
-    font-size: 20px;
-    font-weight: 600;
-  }
-
-  :global(.controls .status) {
-    padding: 12px;
-    border-radius: 8px;
-    margin: 12px 0;
-    font-weight: 500;
-    font-size: 14px;
-  }
-
-  :global(.controls .status.loading) {
-    background: rgba(255, 230, 109, 0.2);
-    color: #ffe66d;
-    border: 1px solid rgba(255, 230, 109, 0.3);
-  }
-
-  :global(.controls .status.success) {
-    background: rgba(78, 205, 196, 0.2);
-    color: #4ecdc4;
-    border: 1px solid rgba(78, 205, 196, 0.3);
-  }
-
-  :global(.controls .status.error) {
-    background: rgba(255, 107, 107, 0.2);
-    color: #ff6b6b;
-    border: 1px solid rgba(255, 107, 107, 0.3);
-  }
-
-  :global(.controls .hint) {
-    font-size: 12px;
-    margin-top: 8px;
-    opacity: 0.8;
-    padding: 8px;
-    background: rgba(255, 255, 255, 0.05);
-    border-radius: 4px;
-  }
-
-  :global(.controls .operation-selector) {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    margin: 15px 0;
-  }
-
-  :global(.controls .operation-selector label) {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    padding: 10px 12px;
-    border-radius: 8px;
-    cursor: pointer;
-    transition: all 0.2s;
-    background: rgba(255, 255, 255, 0.05);
-  }
-
-  :global(.controls .operation-selector label:hover) {
-    background: rgba(255, 255, 255, 0.12);
-    transform: translateX(2px);
-  }
-
-  :global(.controls .operation-selector input[type="radio"]) {
-    width: 18px;
-    height: 18px;
-    cursor: pointer;
-    accent-color: #4ecdc4;
-  }
-
-  :global(.controls .operation-selector span) {
-    font-size: 15px;
-  }
-
-  :global(.controls .info) {
-    margin-top: 20px;
-    padding-top: 20px;
-    border-top: 1px solid rgba(255, 255, 255, 0.15);
-    font-size: 13px;
-    line-height: 1.8;
-  }
-
-  :global(.controls .info p) {
-    margin: 6px 0;
-  }
-
-  :global(.controls .info strong) {
-    color: #4ecdc4;
-  }
-</style>
+<ManifoldPanel 
+  bind:uiState 
+  {manifoldReady} 
+  {error} 
+  {stats}
+/>
