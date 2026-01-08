@@ -27,5 +27,8 @@
     "tslib": "*",
     "typescript": "*",
     "vite": "*"
+  },
+  "dependencies": {
+    "manifold-3d": "^3.3.2"
   }
 }
