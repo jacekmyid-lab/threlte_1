@@ -8,8 +8,14 @@
   export let stats
   export let manifoldReady = false
   export let error = null
+  export let Manifold = null
+  export let Mesh = null
+  export let materialIDs = []
+  export let cadGeometry = null
+  export let showCADGeometry = false
+  export let objects = []
+  export let selectedObjects = []
 
-  let Manifold, Mesh
   let resultGeometry = null
   let rotation = 0
 
@@ -27,6 +33,18 @@
   })
 
   let firstID, ids, id2matIndex
+
+  // Eksportuj funkcję konwersji dla App.svelte
+  export function manifoldToGeometry(manifoldObj) {
+    if (!manifoldObj || !Mesh) return null
+    try {
+      const mesh = manifoldObj.getMesh()
+      return mesh2geometry(mesh)
+    } catch (e) {
+      console.error('Błąd konwersji Manifold→Geometry:', e)
+      return null
+    }
+  }
 
   function geometry2mesh(geometry) {
     const vertProperties = geometry.attributes.position.array
@@ -180,11 +198,14 @@
       
       firstID = Manifold.reserveIDs(materials.length)
       ids = [...Array(materials.length)].map((_, idx) => firstID + idx)
+      materialIDs = ids
       id2matIndex = new Map()
       ids.forEach((id, idx) => id2matIndex.set(id, idx))
       
       manifoldReady = true
       resultGeometry = performBooleanOperation(uiState.operation)
+      
+      console.log('🎉 Scene gotowy!')
       
     } catch (e) {
       console.error('❌ Błąd ładowania Manifold:', e)
@@ -208,18 +229,49 @@
 <T.DirectionalLight position={[5, 5, 5]} intensity={1} castShadow />
 <T.AmbientLight intensity={0.5} />
 
+<!-- Boolean Operations geometry (testowe) -->
 {#if manifoldReady && resultGeometry}
-  <T.Mesh geometry={resultGeometry} material={materials} rotation.y={rotation} />
+  <T.Mesh geometry={resultGeometry} material={materials} rotation.y={rotation} position={[-3, 0, 0]} />
   
   {#if uiState.showWireframe}
-    <T.Mesh geometry={resultGeometry} material={wireframeMaterial} rotation.y={rotation} />
+    <T.Mesh geometry={resultGeometry} material={wireframeMaterial} rotation.y={rotation} position={[-3, 0, 0]} />
   {/if}
-{:else if !error}
-  <T.Mesh>
-    <T.BoxGeometry args={[1, 1, 1]} />
-    <T.MeshStandardMaterial color="orange" />
-  </T.Mesh>
 {/if}
+
+<!-- Obiekty użytkownika -->
+{#each objects as obj}
+  {#if obj.visible && obj.geometry}
+    <T.Mesh 
+      geometry={obj.geometry} 
+      material={materials}
+      position={obj.position}
+      rotation.y={rotation}
+      scale={selectedObjects.includes(obj.id) ? 1.1 : 1.0}
+    />
+    
+    {#if uiState.showWireframe}
+      <T.Mesh 
+        geometry={obj.geometry} 
+        material={wireframeMaterial}
+        position={obj.position}
+        rotation.y={rotation}
+        scale={selectedObjects.includes(obj.id) ? 1.1 : 1.0}
+      />
+    {/if}
+    
+    <!-- Highlight dla zaznaczonych -->
+    {#if selectedObjects.includes(obj.id)}
+      <T.Mesh 
+        geometry={obj.geometry} 
+        position={obj.position}
+        rotation.y={rotation}
+        scale={1.15}
+      >
+        <T.MeshBasicMaterial color="#667eea" transparent opacity={0.3} />
+      </T.Mesh>
+    {/if}
+  {/if}
+{/each}
 
 <T.Mesh rotation.x={-Math.PI/2} position.y={-1.5} receiveShadow>
   <T.CircleGeometry args={[5, 32]}/>
