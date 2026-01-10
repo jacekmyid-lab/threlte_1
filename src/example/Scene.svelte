@@ -16,173 +16,46 @@
   export let objects = []
   export let selectedObjects = []
 
-  let resultGeometry = null
-  let rotation = 0
-
-  const materials = [
-    new THREE.MeshLambertMaterial({ color: 0xff6b6b, flatShading: true }),
-    new THREE.MeshLambertMaterial({ color: 0x4ecdc4, flatShading: true }),
-    new THREE.MeshLambertMaterial({ color: 0xffe66d, flatShading: true })
-  ]
-
   const wireframeMaterial = new THREE.MeshBasicMaterial({ 
     color: 0xffffff, 
     wireframe: true,
     transparent: true,
     opacity: 0.3
   })
+  
+  const edgeMaterial = new THREE.LineBasicMaterial({
+    color: 0x000000,
+    linewidth: 2
+  })
 
   let firstID, ids, id2matIndex
-
-  // Eksportuj funkcję konwersji dla App.svelte
-  export function manifoldToGeometry(manifoldObj) {
-    if (!manifoldObj || !Mesh) return null
-    try {
-      const mesh = manifoldObj.getMesh()
-      return mesh2geometry(mesh)
-    } catch (e) {
-      console.error('Błąd konwersji Manifold→Geometry:', e)
-      return null
+  
+  // Cache materiałów
+  let materialCache = new Map()
+  let edgesCache = new Map()
+  
+  function getMaterialForColor(colorHex) {
+    if (!materialCache.has(colorHex)) {
+      materialCache.set(
+        colorHex, 
+        new THREE.MeshLambertMaterial({ 
+          color: colorHex, 
+          flatShading: true 
+        })
+      )
     }
+    return materialCache.get(colorHex)
   }
-
-  function geometry2mesh(geometry) {
-    const vertProperties = geometry.attributes.position.array
-    const triVerts = geometry.index != null ?
-      geometry.index.array :
-      new Uint32Array(vertProperties.length / 3).map((_, idx) => idx)
-    
-    const starts = [...Array(geometry.groups.length)].map(
-      (_, idx) => geometry.groups[idx].start)
-    
-    const originalIDs = [...Array(geometry.groups.length)].map(
-      (_, idx) => ids[geometry.groups[idx].materialIndex])
-    
-    const indices = Array.from(starts.keys())
-    indices.sort((a, b) => starts[a] - starts[b])
-    
-    const runIndex = new Uint32Array(indices.map(i => starts[i]))
-    const runOriginalID = new Uint32Array(indices.map(i => originalIDs[i]))
-    
-    const mesh = new Mesh({
-      numProp: 3,
-      vertProperties,
-      triVerts,
-      runIndex,
-      runOriginalID
-    })
-    
-    mesh.merge()
-    return mesh
-  }
-
-  function mesh2geometry(mesh) {
-    const geometry = new THREE.BufferGeometry()
-    
-    geometry.setAttribute(
-      'position',
-      new THREE.BufferAttribute(mesh.vertProperties, 3)
-    )
-    geometry.setIndex(new THREE.BufferAttribute(mesh.triVerts, 1))
-    
-    let id = mesh.runOriginalID[0]
-    let start = mesh.runIndex[0]
-    
-    for (let run = 0; run < mesh.numRun; run++) {
-      const nextID = mesh.runOriginalID[run + 1]
-      if (nextID !== id) {
-        const end = mesh.runIndex[run + 1]
-        geometry.addGroup(start, end - start, id2matIndex.get(id))
-        id = nextID
-        start = end
-      }
+  
+  function getEdgesGeometry(geometry) {
+    const key = geometry.uuid
+    if (!edgesCache.has(key)) {
+      // Używamy EdgesGeometry do wykrycia krawędzi
+      const edges = new THREE.EdgesGeometry(geometry, 20)
+      edgesCache.set(key, edges)
     }
-    
-    geometry.computeBoundingSphere()
-    return geometry
+    return edgesCache.get(key)
   }
-
-  function createBoxWithSeparateFaces() {
-    const geometry = new THREE.BoxGeometry(uiState.boxSize, uiState.boxSize, uiState.boxSize)
-    geometry.clearGroups()
-    geometry.addGroup(0, 18, 0)
-    geometry.addGroup(18, Infinity, 1)
-    return geometry
-  }
-
-  function createIcosahedron() {
-    const geometry = new THREE.IcosahedronGeometry(uiState.icoRadius, uiState.icoDetail)
-    
-    if (!geometry.index) {
-      const positions = geometry.attributes.position
-      const indices = []
-      for (let i = 0; i < positions.count; i++) {
-        indices.push(i)
-      }
-      geometry.setIndex(indices)
-    }
-    
-    geometry.clearGroups()
-    const halfFaces = Math.floor(geometry.index.count / 2)
-    geometry.addGroup(halfFaces, Infinity, 2)
-    geometry.addGroup(0, halfFaces, 0)
-    return geometry
-  }
-
-  function updateStats(manifoldResult) {
-    try {
-      if (!resultGeometry) return
-      
-      stats.vertices = resultGeometry.attributes.position.count
-      stats.triangles = Math.floor(resultGeometry.index.count / 3)
-      
-      if (typeof manifoldResult.genus === 'function') {
-        stats.genus = manifoldResult.genus()
-      }
-      
-      stats.volume = 'N/A'
-      stats.surfaceArea = 'N/A'
-    } catch (e) {
-      console.warn('Nie można pobrać statystyk:', e)
-    }
-  }
-
-  function performBooleanOperation(op) {
-    if (!manifoldReady) return null
-    
-    try {
-      const boxGeometry = createBoxWithSeparateFaces()
-      const icoGeometry = createIcosahedron()
-      
-      const manifoldBox = new Manifold(geometry2mesh(boxGeometry))
-      const manifoldIco = new Manifold(geometry2mesh(icoGeometry))
-      
-      let result
-      if (op === 'union') {
-        result = manifoldBox.add(manifoldIco)
-      } else if (op === 'difference') {
-        result = manifoldBox.subtract(manifoldIco)
-      } else if (op === 'intersection') {
-        result = manifoldBox.intersect(manifoldIco)
-      }
-      
-      const geo = mesh2geometry(result.getMesh())
-      updateStats(result)
-      error = null
-      return geo
-      
-    } catch (e) {
-      console.error('Operacja boolean nie powiodła się:', e)
-      error = e.message
-      return null
-    }
-  }
-
-  useFrame((state, delta) => {
-    if (uiState.autoRotate) {
-      rotation += delta * 0.5
-    }
-  })
 
   onMount(async () => {
     try {
@@ -196,14 +69,14 @@
       
       console.log('✅ Manifold załadowany')
       
-      firstID = Manifold.reserveIDs(materials.length)
-      ids = [...Array(materials.length)].map((_, idx) => firstID + idx)
+      const defaultMaterialCount = 3
+      firstID = Manifold.reserveIDs(defaultMaterialCount)
+      ids = [...Array(defaultMaterialCount)].map((_, idx) => firstID + idx)
       materialIDs = ids
       id2matIndex = new Map()
       ids.forEach((id, idx) => id2matIndex.set(id, idx))
       
       manifoldReady = true
-      resultGeometry = performBooleanOperation(uiState.operation)
       
       console.log('🎉 Scene gotowy!')
       
@@ -212,50 +85,50 @@
       error = `Błąd: ${e.message}`
     }
   })
-
-  $: if (manifoldReady) {
-    resultGeometry = performBooleanOperation(uiState.operation)
-  }
 </script>
 
 <T.PerspectiveCamera
   makeDefault
-  position={[3, 3, 5]}
+  position={[5, 5, 8]}
   on:create={({ ref }) => {
     ref.lookAt(0, 0, 0)
   }}
 />
 
-<T.DirectionalLight position={[5, 5, 5]} intensity={1} castShadow />
-<T.AmbientLight intensity={0.5} />
-
-<!-- Boolean Operations geometry (testowe) -->
-{#if manifoldReady && resultGeometry}
-  <T.Mesh geometry={resultGeometry} material={materials} rotation.y={rotation} position={[-3, 0, 0]} />
-  
-  {#if uiState.showWireframe}
-    <T.Mesh geometry={resultGeometry} material={wireframeMaterial} rotation.y={rotation} position={[-3, 0, 0]} />
-  {/if}
-{/if}
+<T.DirectionalLight position={[5, 5, 5]} intensity={1.2} castShadow />
+<T.DirectionalLight position={[-3, 3, -3]} intensity={0.4} />
+<T.AmbientLight intensity={0.6} />
 
 <!-- Obiekty użytkownika -->
 {#each objects as obj}
   {#if obj.visible && obj.geometry}
+    <!-- Główny mesh -->
     <T.Mesh 
       geometry={obj.geometry} 
-      material={materials}
+      material={getMaterialForColor(obj.color)}
       position={obj.position}
-      rotation.y={rotation}
-      scale={selectedObjects.includes(obj.id) ? 1.1 : 1.0}
+      scale={selectedObjects.includes(obj.id) ? 1.05 : 1.0}
+      castShadow
+      receiveShadow
     />
     
+    <!-- Krawędzie -->
+    {#if uiState.showEdges}
+      <T.LineSegments
+        geometry={getEdgesGeometry(obj.geometry)}
+        material={edgeMaterial}
+        position={obj.position}
+        scale={selectedObjects.includes(obj.id) ? 1.05 : 1.0}
+      />
+    {/if}
+    
+    <!-- Wireframe -->
     {#if uiState.showWireframe}
       <T.Mesh 
         geometry={obj.geometry} 
         material={wireframeMaterial}
         position={obj.position}
-        rotation.y={rotation}
-        scale={selectedObjects.includes(obj.id) ? 1.1 : 1.0}
+        scale={selectedObjects.includes(obj.id) ? 1.05 : 1.0}
       />
     {/if}
     
@@ -264,16 +137,19 @@
       <T.Mesh 
         geometry={obj.geometry} 
         position={obj.position}
-        rotation.y={rotation}
-        scale={1.15}
+        scale={1.1}
       >
-        <T.MeshBasicMaterial color="#667eea" transparent opacity={0.3} />
+        <T.MeshBasicMaterial color="#667eea" transparent opacity={0.25} />
       </T.Mesh>
     {/if}
   {/if}
 {/each}
 
-<T.Mesh rotation.x={-Math.PI/2} position.y={-1.5} receiveShadow>
-  <T.CircleGeometry args={[5, 32]}/>
+<!-- Podłoga -->
+<T.Mesh rotation.x={-Math.PI/2} position.y={-2} receiveShadow>
+  <T.CircleGeometry args={[10, 64]}/>
   <T.MeshStandardMaterial color="#1a1a2e" />
 </T.Mesh>
+
+<!-- Siatka pomocnicza -->
+<T.GridHelper args={[20, 20, '#444', '#222']} position.y={-2} />

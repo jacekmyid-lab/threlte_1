@@ -2,17 +2,15 @@
   import { Canvas } from '@threlte/core'
   import Scene from './Scene.svelte'
   import CADEditor from './CADEditor.svelte'
+  import * as THREE from 'three'
   
   let mode = 'boolean' // 'boolean' | 'cad'
   
   let uiState = {
     operation: 'union',
-    autoRotate: true,
     showWireframe: false,
     showStats: true,
-    boxSize: 1.0,
-    icoRadius: 0.6,
-    icoDetail: 0
+    showEdges: true
   }
   
   let stats = {
@@ -30,17 +28,77 @@
   let materialIDs = []
   
   // System obiektów
-  let objects = [] // Lista wszystkich obiektów Manifold
-  let selectedObjects = [] // Zaznaczone obiekty do operacji
+  let objects = []
+  let selectedObjects = []
+  let draggedObject = null
   
   // CAD geometry (tymczasowe)
   let cadGeometry = null
   let showCADGeometry = false
   
+  // Paleta kolorów dla różnych typów obiektów
+  const colorPalette = {
+    extrude: '#4ecdc4',
+    union: '#667eea',
+    difference: '#ff6b6b',
+    intersection: '#ffa502',
+    trim: '#26de81',
+    split: '#a29bfe',
+    boolean_result: '#fd79a8'
+  }
+  
+  function getColorForType(type, operation = null) {
+    if (type === 'boolean_result' && operation) {
+      return colorPalette[operation] || colorPalette.boolean_result
+    }
+    return colorPalette[type] || '#95afc0'
+  }
+  
+  // Konwersja Manifold → Three.js Geometry
+  function manifoldToGeometry(manifoldObj) {
+    if (!manifoldObj || !Mesh) return null
+    
+    try {
+      const mesh = manifoldObj.getMesh()
+      
+      const geometry = new THREE.BufferGeometry()
+      
+      geometry.setAttribute(
+        'position',
+        new THREE.BufferAttribute(mesh.vertProperties, 3)
+      )
+      geometry.setIndex(new THREE.BufferAttribute(mesh.triVerts, 1))
+      
+      let id = mesh.runOriginalID[0]
+      let start = mesh.runIndex[0]
+      
+      const id2matIndex = new Map()
+      materialIDs.forEach((id, idx) => id2matIndex.set(id, idx))
+      
+      for (let run = 0; run < mesh.numRun; run++) {
+        const nextID = mesh.runOriginalID[run + 1]
+        if (nextID !== id) {
+          const end = mesh.runIndex[run + 1]
+          geometry.addGroup(start, end - start, id2matIndex.get(id))
+          id = nextID
+          start = end
+        }
+      }
+      
+      geometry.computeBoundingSphere()
+      geometry.computeVertexNormals()
+      
+      return geometry
+      
+    } catch (e) {
+      console.error('❌ Błąd konwersji Manifold→Geometry:', e)
+      return null
+    }
+  }
+  
   function handleCADGeometryCreated(data) {
     console.log('🎯 CAD Geometry created:', data)
     
-    // Dodaj do listy obiektów
     const newObject = {
       id: `obj_${Date.now()}`,
       name: `Extrude ${objects.length + 1}`,
@@ -49,20 +107,20 @@
       manifold: data.manifold,
       contour: data.contour,
       extrusion: data.extrusion,
-      position: [objects.length * 2.5, 0, 0], // Rozmieść obiekty
-      visible: true
+      position: [objects.length * 2.5, 0, 0],
+      visible: true,
+      color: getColorForType('extrude')
     }
     
     objects = [...objects, newObject]
     
-    // Aktualizuj statystyki z tego obiektu
     if (data.manifold) {
       stats.vertices = data.manifold.numVert()
       stats.triangles = data.manifold.numTri()
       stats.genus = data.manifold.genus()
     }
     
-    cadGeometry = null // Wyczyść tymczasowy obiekt
+    cadGeometry = null
     console.log('✓ Obiekt dodany do sceny:', newObject)
   }
   
@@ -74,9 +132,28 @@
     }
   }
   
+  function toggleObjectVisibility(objId) {
+    objects = objects.map(obj => 
+      obj.id === objId ? { ...obj, visible: !obj.visible } : obj
+    )
+  }
+  
   function deleteObject(objId) {
     objects = objects.filter(obj => obj.id !== objId)
     selectedObjects = selectedObjects.filter(id => id !== objId)
+  }
+  
+  function moveObject(objId, axis, delta) {
+    objects = objects.map(obj => {
+      if (obj.id === objId) {
+        const newPos = [...obj.position]
+        if (axis === 'x') newPos[0] += delta
+        if (axis === 'y') newPos[1] += delta
+        if (axis === 'z') newPos[2] += delta
+        return { ...obj, position: newPos }
+      }
+      return obj
+    })
   }
   
   function performBooleanOnSelected() {
@@ -94,67 +171,108 @@
     }
     
     try {
+      // Przesunięcie manifoldów zgodnie z pozycją obiektów
+      const m1 = obj1.manifold.translate(obj1.position)
+      const m2 = obj2.manifold.translate(obj2.position)
+      
       let result
       let resultName = ''
+      let operation = uiState.operation
       
-      if (uiState.operation === 'union') {
-        result = obj1.manifold.add(obj2.manifold)
+      if (operation === 'union') {
+        result = m1.add(m2)
         resultName = `${obj1.name} ∪ ${obj2.name}`
-      } else if (uiState.operation === 'difference') {
-        result = obj1.manifold.subtract(obj2.manifold)
-        resultName = `${obj1.name} − ${obj2.name}`
-      } else if (uiState.operation === 'intersection') {
-        result = obj1.manifold.intersect(obj2.manifold)
+        
+      } else if (operation === 'difference') {
+        result = m1.subtract(m2)
+        resultName = `${obj1.name} ∖ ${obj2.name}`
+        
+      } else if (operation === 'intersection') {
+        result = m1.intersect(m2)
         resultName = `${obj1.name} ∩ ${obj2.name}`
-      } else if (uiState.operation === 'trim') {
-        result = obj1.manifold.trimByPlane([0, 0, 1], 0)
+        
+      } else if (operation === 'trim') {
+        result = m1.trimByPlane([0, 0, 1], 0)
         resultName = `${obj1.name} (trimmed)`
-      } else if (uiState.operation === 'split') {
-        const [part1, part2] = obj1.manifold.split(obj2.manifold)
-        // Dla split dodajemy obie części
-        if (part1 && !part1.isEmpty()) {
-          addResultObject(part1, `${obj1.name} (część 1)`, obj1.position)
+        
+      } else if (operation === 'split') {
+        const parts = m1.split(m2)
+        
+        if (parts && parts.length === 2) {
+          const [part1, part2] = parts
+          
+          if (part1 && !part1.isEmpty()) {
+            addResultObject(part1, `${obj1.name} (część 1)`, [0, 0, 0], 'split')
+          }
+          if (part2 && !part2.isEmpty()) {
+            addResultObject(part2, `${obj1.name} (część 2)`, [2.5, 0, 0], 'split')
+          }
         }
-        if (part2 && !part2.isEmpty()) {
-          addResultObject(part2, `${obj1.name} (część 2)`, [obj1.position[0] + 1.5, obj1.position[1], obj1.position[2]])
-        }
+        
         selectedObjects = []
         return
       }
       
-      if (result && !result.isEmpty()) {
-        addResultObject(result, resultName, [(obj1.position[0] + obj2.position[0]) / 2, 0, 0])
-        console.log('✓ Boolean operation result:', result)
-      } else {
-        alert('Operacja zwróciła pusty wynik')
+      if (!result) {
+        alert('Operacja nie zwróciła wyniku')
+        return
       }
       
+      if (result.isEmpty()) {
+        alert('Operacja zwróciła pusty wynik')
+        return
+      }
+      
+      addResultObject(result, resultName, [0, 0, 0], operation)
       selectedObjects = []
       
     } catch (e) {
-      console.error('Błąd operacji Boolean:', e)
+      console.error('❌ Błąd operacji Boolean:', e)
       alert(`Błąd: ${e.message}`)
     }
   }
   
-  function addResultObject(manifold, name, position) {
-    // Musimy przekonwertować Manifold z powrotem na geometrię
-    // Na razie tworzymy placeholder
-    const newObject = {
-      id: `obj_${Date.now()}`,
-      name: name,
-      type: 'boolean_result',
-      geometry: null, // TODO: Konwersja manifold -> geometry
-      manifold: manifold,
-      position: position,
-      visible: true
+  function addResultObject(manifold, name, position, operation) {
+    try {
+      const geometry = manifoldToGeometry(manifold)
+      
+      if (!geometry) {
+        alert('Nie udało się skonwertować wyniku na geometrię')
+        return
+      }
+      
+      const newObject = {
+        id: `obj_${Date.now()}`,
+        name: name,
+        type: 'boolean_result',
+        operation: operation,
+        geometry: geometry,
+        manifold: manifold,
+        position: position,
+        visible: true,
+        color: getColorForType('boolean_result', operation)
+      }
+      
+      objects = [...objects, newObject]
+      
+      stats.vertices = manifold.numVert()
+      stats.triangles = manifold.numTri()
+      stats.genus = manifold.genus()
+      
+      console.log('✅ Wynik Boolean dodany:', {
+        name: newObject.name,
+        vertices: stats.vertices,
+        triangles: stats.triangles,
+        color: newObject.color
+      })
+      
+    } catch (e) {
+      console.error('❌ Błąd dodawania wyniku:', e)
+      alert(`Błąd: ${e.message}`)
     }
-    
-    objects = [...objects, newObject]
-    console.log('✓ Wynik dodany:', newObject)
   }
   
-  $: showCADGeometry = false // CAD geometry jest tylko tymczasowe
+  $: showCADGeometry = false
 </script>
 
 <!-- Mode Toggle -->
@@ -199,7 +317,7 @@
     
     <!-- Left Sidebar - Boolean Mode -->
     {#if mode === 'boolean'}
-      <div style="width: 300px; background: #1a1a2e; color: white; overflow-y: auto; box-shadow: 2px 0 10px rgba(0,0,0,0.2); pointer-events: auto;">
+      <div style="width: 320px; background: #1a1a2e; color: white; overflow-y: auto; box-shadow: 2px 0 10px rgba(0,0,0,0.2); pointer-events: auto;">
         
         <div style="padding: 20px; border-bottom: 1px solid #2a2a3e;">
           <h3 style="margin: 0 0 12px 0; font-size: 14px; text-transform: uppercase; letter-spacing: 1px; color: #888;">Operacje Boolean</h3>
@@ -207,80 +325,49 @@
             <label style="display: flex; align-items: center; gap: 10px; padding: 12px; background: {uiState.operation === 'union' ? '#667eea' : '#2a2a3e'}; border-radius: 8px; cursor: pointer;">
               <input type="radio" bind:group={uiState.operation} value="union" style="width: 18px; height: 18px;">
               <span style="font-size: 20px;">➕</span>
-              <span>Union (∪)</span>
+              <span>Union (A ∪ B)</span>
             </label>
             <label style="display: flex; align-items: center; gap: 10px; padding: 12px; background: {uiState.operation === 'difference' ? '#667eea' : '#2a2a3e'}; border-radius: 8px; cursor: pointer;">
               <input type="radio" bind:group={uiState.operation} value="difference" style="width: 18px; height: 18px;">
               <span style="font-size: 20px;">➖</span>
-              <span>Difference (−)</span>
+              <span>Difference (A - B)</span>
             </label>
             <label style="display: flex; align-items: center; gap: 10px; padding: 12px; background: {uiState.operation === 'intersection' ? '#667eea' : '#2a2a3e'}; border-radius: 8px; cursor: pointer;">
               <input type="radio" bind:group={uiState.operation} value="intersection" style="width: 18px; height: 18px;">
               <span style="font-size: 20px;">✖️</span>
-              <span>Intersection (∩)</span>
+              <span>Intersection (A ∩ B)</span>
             </label>
             <label style="display: flex; align-items: center; gap: 10px; padding: 12px; background: {uiState.operation === 'trim' ? '#667eea' : '#2a2a3e'}; border-radius: 8px; cursor: pointer;">
               <input type="radio" bind:group={uiState.operation} value="trim" style="width: 18px; height: 18px;">
               <span style="font-size: 20px;">✂️</span>
-              <span>Trim</span>
+              <span>Trim (płaszczyzna)</span>
             </label>
             <label style="display: flex; align-items: center; gap: 10px; padding: 12px; background: {uiState.operation === 'split' ? '#667eea' : '#2a2a3e'}; border-radius: 8px; cursor: pointer;">
               <input type="radio" bind:group={uiState.operation} value="split" style="width: 18px; height: 18px;">
               <span style="font-size: 20px;">🔪</span>
-              <span>Split</span>
+              <span>Split (podziel)</span>
             </label>
-          </div>
-        </div>
-
-        <div style="padding: 20px; border-bottom: 1px solid #2a2a3e;">
-          <h3 style="margin: 0 0 12px 0; font-size: 14px; text-transform: uppercase; letter-spacing: 1px; color: #888;">Parametry</h3>
-          
-          <div style="margin-bottom: 16px;">
-            <div style="display: flex; justify-content: space-between; margin-bottom: 6px;">
-              <span style="font-size: 13px;">Box Size</span>
-              <span style="font-size: 13px; color: #667eea; font-weight: 600;">{uiState.boxSize.toFixed(2)}</span>
-            </div>
-            <input type="range" bind:value={uiState.boxSize} min="0.5" max="2" step="0.1" 
-              style="width: 100%; height: 6px; background: #2a2a3e; border-radius: 3px; cursor: pointer;">
-          </div>
-
-          <div style="margin-bottom: 16px;">
-            <div style="display: flex; justify-content: space-between; margin-bottom: 6px;">
-              <span style="font-size: 13px;">Ico Radius</span>
-              <span style="font-size: 13px; color: #667eea; font-weight: 600;">{uiState.icoRadius.toFixed(2)}</span>
-            </div>
-            <input type="range" bind:value={uiState.icoRadius} min="0.3" max="1.5" step="0.1"
-              style="width: 100%; height: 6px; background: #2a2a3e; border-radius: 3px; cursor: pointer;">
-          </div>
-
-          <div>
-            <div style="display: flex; justify-content: space-between; margin-bottom: 6px;">
-              <span style="font-size: 13px;">Ico Detail</span>
-              <span style="font-size: 13px; color: #667eea; font-weight: 600;">{uiState.icoDetail}</span>
-            </div>
-            <input type="range" bind:value={uiState.icoDetail} min="0" max="3" step="1"
-              style="width: 100%; height: 6px; background: #2a2a3e; border-radius: 3px; cursor: pointer;">
           </div>
         </div>
 
         <div style="padding: 20px; border-bottom: 1px solid #2a2a3e;">
           <h3 style="margin: 0 0 12px 0; font-size: 14px; text-transform: uppercase; letter-spacing: 1px; color: #888;">Wyświetlanie</h3>
           <label style="display: flex; align-items: center; gap: 10px; padding: 8px 0; cursor: pointer;">
-            <input type="checkbox" bind:checked={uiState.autoRotate} style="width: 18px; height: 18px;">
-            <span>🔄 Auto-rotate</span>
-          </label>
-          <label style="display: flex; align-items: center; gap: 10px; padding: 8px 0; cursor: pointer;">
             <input type="checkbox" bind:checked={uiState.showWireframe} style="width: 18px; height: 18px;">
             <span>🕸️ Wireframe</span>
           </label>
           <label style="display: flex; align-items: center; gap: 10px; padding: 8px 0; cursor: pointer;">
+            <input type="checkbox" bind:checked={uiState.showEdges} style="width: 18px; height: 18px;">
+            <span>📐 Krawędzie</span>
+          </label>
+          <label style="display: flex; align-items: center; gap: 10px; padding: 8px 0; cursor: pointer;">
             <input type="checkbox" bind:checked={uiState.showStats} style="width: 18px; height: 18px;">
-            <span>📊 Statistics</span>
+            <span>📊 Statystyki</span>
           </label>
         </div>
 
         {#if uiState.showStats && manifoldReady}
-          <div style="padding: 20px;">
+          <div style="padding: 20px; border-bottom: 1px solid #2a2a3e;">
             <h3 style="margin: 0 0 12px 0; font-size: 14px; text-transform: uppercase; letter-spacing: 1px; color: #888;">Statystyki</h3>
             <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; font-size: 13px;">
               <div style="background: #2a2a3e; padding: 12px; border-radius: 6px;">
@@ -296,59 +383,77 @@
                 <div style="color: #667eea; font-weight: 700; font-size: 18px;">{stats.genus}</div>
               </div>
               <div style="background: #2a2a3e; padding: 12px; border-radius: 6px;">
-                <div style="color: #888; margin-bottom: 4px;">Volume</div>
-                <div style="color: #667eea; font-weight: 700; font-size: 16px;">{stats.volume}</div>
+                <div style="color: #888; margin-bottom: 4px;">Obiekty</div>
+                <div style="color: #667eea; font-weight: 700; font-size: 18px;">{objects.length}</div>
               </div>
             </div>
-          </div>
-        {/if}
-        
-        {#if cadGeometry}
-          <div style="padding: 20px; border-top: 1px solid #2a2a3e;">
-            <h3 style="margin: 0 0 12px 0; font-size: 14px; text-transform: uppercase; letter-spacing: 1px; color: #888;">Obiekt CAD</h3>
-            <div style="background: #2a2a3e; padding: 12px; border-radius: 6px; margin-bottom: 12px;">
-              <div style="color: #4ecdc4; font-weight: 600; margin-bottom: 8px;">✓ W scenie 3D</div>
-              <div style="font-size: 12px; color: #888;">
-                Punkty konturu: {cadGeometry.contour.length}<br>
-                Wysokość: {cadGeometry.extrusion.height}
-              </div>
-            </div>
-            <button
-              on:click={() => cadGeometry = null}
-              style="width: 100%; padding: 10px; background: #ff6b6b; color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: 600; font-size: 13px;"
-            >
-              🗑️ Usuń obiekt CAD
-            </button>
           </div>
         {/if}
         
         <!-- Lista obiektów -->
         {#if objects.length > 0}
-          <div style="padding: 20px; border-top: 1px solid #2a2a3e;">
+          <div style="padding: 20px;">
             <h3 style="margin: 0 0 12px 0; font-size: 14px; text-transform: uppercase; letter-spacing: 1px; color: #888;">Obiekty ({objects.length})</h3>
             
-            <div style="margin-bottom: 12px;">
+            <div style="margin-bottom: 12px; max-height: 400px; overflow-y: auto;">
               {#each objects as obj}
-                <div style="background: {selectedObjects.includes(obj.id) ? 'rgba(102, 126, 234, 0.2)' : '#2a2a3e'}; padding: 10px; border-radius: 6px; margin-bottom: 8px; border: 2px solid {selectedObjects.includes(obj.id) ? '#667eea' : 'transparent'};">
-                  <div style="display: flex; align-items: center; gap: 8px;">
+                <div style="background: {selectedObjects.includes(obj.id) ? 'rgba(102, 126, 234, 0.2)' : '#2a2a3e'}; padding: 10px; border-radius: 6px; margin-bottom: 8px; border: 2px solid {selectedObjects.includes(obj.id) ? '#667eea' : 'transparent'}; opacity: {obj.visible ? 1 : 0.5};">
+                  <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 8px;">
                     <input 
                       type="checkbox" 
                       checked={selectedObjects.includes(obj.id)}
                       on:change={() => toggleObjectSelection(obj.id)}
                       style="width: 18px; height: 18px; cursor: pointer;"
                     />
+                    
+                    <div style="width: 12px; height: 12px; border-radius: 50%; background: {obj.color}; flex-shrink: 0;"></div>
+                    
                     <div style="flex: 1;">
                       <div style="font-weight: 600; font-size: 13px;">{obj.name}</div>
                       <div style="font-size: 11px; color: #888; margin-top: 2px;">
-                        {obj.type} • V:{obj.manifold?.numVert() || '?'} T:{obj.manifold?.numTri() || '?'}
+                        V:{obj.manifold?.numVert() || '?'} T:{obj.manifold?.numTri() || '?'}
                       </div>
                     </div>
+                    
+                    <button
+                      on:click={() => toggleObjectVisibility(obj.id)}
+                      style="padding: 6px 10px; background: {obj.visible ? '#4ecdc4' : '#555'}; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 11px;"
+                      title={obj.visible ? 'Ukryj' : 'Pokaż'}
+                    >
+                      {obj.visible ? '👁️' : '🚫'}
+                    </button>
+                    
                     <button
                       on:click={() => deleteObject(obj.id)}
                       style="padding: 6px 10px; background: #ff6b6b; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 11px;"
                     >
                       🗑️
                     </button>
+                  </div>
+                  
+                  <!-- Kontrolki przesuwania -->
+                  <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; font-size: 11px;">
+                    <div>
+                      <div style="color: #888; margin-bottom: 2px;">X: {obj.position[0].toFixed(1)}</div>
+                      <div style="display: flex; gap: 2px;">
+                        <button on:click={() => moveObject(obj.id, 'x', -0.5)} style="flex: 1; padding: 4px; background: #555; color: white; border: none; border-radius: 3px; cursor: pointer;">◀</button>
+                        <button on:click={() => moveObject(obj.id, 'x', 0.5)} style="flex: 1; padding: 4px; background: #555; color: white; border: none; border-radius: 3px; cursor: pointer;">▶</button>
+                      </div>
+                    </div>
+                    <div>
+                      <div style="color: #888; margin-bottom: 2px;">Y: {obj.position[1].toFixed(1)}</div>
+                      <div style="display: flex; gap: 2px;">
+                        <button on:click={() => moveObject(obj.id, 'y', -0.5)} style="flex: 1; padding: 4px; background: #555; color: white; border: none; border-radius: 3px; cursor: pointer;">▼</button>
+                        <button on:click={() => moveObject(obj.id, 'y', 0.5)} style="flex: 1; padding: 4px; background: #555; color: white; border: none; border-radius: 3px; cursor: pointer;">▲</button>
+                      </div>
+                    </div>
+                    <div>
+                      <div style="color: #888; margin-bottom: 2px;">Z: {obj.position[2].toFixed(1)}</div>
+                      <div style="display: flex; gap: 2px;">
+                        <button on:click={() => moveObject(obj.id, 'z', -0.5)} style="flex: 1; padding: 4px; background: #555; color: white; border: none; border-radius: 3px; cursor: pointer;">◀</button>
+                        <button on:click={() => moveObject(obj.id, 'z', 0.5)} style="flex: 1; padding: 4px; background: #555; color: white; border: none; border-radius: 3px; cursor: pointer;">▶</button>
+                      </div>
+                    </div>
                   </div>
                 </div>
               {/each}
@@ -366,6 +471,11 @@
                 Zaznacz 2 obiekty do operacji Boolean
               </div>
             {/if}
+          </div>
+        {:else}
+          <div style="padding: 20px; text-align: center; color: #888;">
+            <p>Brak obiektów</p>
+            <p style="font-size: 12px;">Przejdź do CAD Editor aby stworzyć obiekty</p>
           </div>
         {/if}
       </div>
@@ -400,7 +510,7 @@
     <span style="margin-left: 20px;">|</span>
     <span style="margin-left: 20px;">Mode: {mode === 'boolean' ? 'Boolean Operations' : 'CAD Editor'}</span>
     <span style="margin-left: 20px;">|</span>
-    <span style="margin-left: 20px;">Made with Threlte + Three.js</span>
+    <span style="margin-left: 20px;">Obiekty: {objects.length}</span>
   </div>
 </div>
 
